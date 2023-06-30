@@ -1,0 +1,120 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include "painlessMesh.h"
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino resetpin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// GPIO5/18  -- SX1278's SCK
+// GPIO19/19 -- SX1278's MISO
+// GPIO27/23 -- SX1278's MOSI
+// GPIO18/18 -- SX1278's Ck
+// GPIO14/14 -- SX1278's RESET
+// GPIO26 -- SX1278's IRQ(Interrupt Request)
+//OLED pins to ESP32 0.96OLEDGPIOs :
+//OLED_SDA -- GPIO4
+//OLED_SCL -- GPIO15
+//OLED_RST -- GPIO16
+#define   MESH_PREFIX     "HelloMyMesh"
+#define   MESH_PASSWORD   "hellomymeshnetwork"
+#define   MESH_PORT       5555
+#define SS      5
+#define RST     14
+#define DI0     2
+#define BAND    920E6  //915E6
+painlessMesh  mesh;
+// Send my ID every 10 seconds to inform others
+Scheduler userScheduler; 
+Task logServerTask(10000, TASK_FOREVER, []() {
+  DynamicJsonDocument jsonBuffer(1024);
+  JsonObject msg = jsonBuffer.to<JsonObject>();
+  msg["topic"] = "logServer";
+  msg["nodeId"] = mesh.getNodeId();
+  String str;
+  serializeJson(msg, str);
+  //msg.printTo(str); //v5
+  mesh.sendBroadcast(str);
+  // log to serial
+  serializeJson(msg, Serial);
+  //msg.printTo(Serial); //v5
+  Serial.printf("\n");
+});
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(25, OUTPUT); //Send success, LED will bright 1 second
+  while (!Serial);
+  pinMode(16, OUTPUT);
+  digitalWrite(16, LOW);    // set GPIO16 low to reset OLED
+  delay(50);
+  digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high
+  Serial.println("LoRa PainlessMesh Server");
+  SPI.begin(18, 19, 23, 18);   //กำหนดขา 
+  LoRa.setPins(SS, RST, DI0);
+  if (!LoRa.begin(BAND)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+  Serial.println("LoRa Initial OK!");
+  // Initialising the UI will init the display too.
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  
+  delay(2000);
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setCursor(10, 5);
+  display.print("Mesh Server Node:");
+  display.display();
+  
+  mesh.setDebugMsgTypes( ERROR | CONNECTION | S_TIME );
+  mesh.init( MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT, WIFI_AP_STA, 6 );
+  mesh.onReceive(&receivedCallback);
+  mesh.onNewConnection([](size_t nodeId) {
+    Serial.printf("New Connection %u\n", nodeId);
+  });
+  mesh.onDroppedConnection([](size_t nodeId) {
+    Serial.printf("Dropped Connection %u\n", nodeId);
+  });
+  // Add the task to the mesh scheduler
+  //mesh.scheduler.addTask(logServerTask);
+  userScheduler.addTask(logServerTask);
+  logServerTask.enable();
+}
+
+void loop() {
+  mesh.update();
+}
+
+void receivedCallback( uint32_t from, String &msg ) {
+  
+  String tmp_string = msg.c_str();
+  
+  Serial.printf("logServer: Received from %u msg=%s\n", from, tmp_string);
+  
+  Serial.println("");
+  Serial.println("Sending LoRa packet: "+tmp_string);
+  
+  
+  //เมื่อได้รับข้อความจากใน mesh network ก็ส่งต่อผ่านไปยัง LoRa
+  LoRa.beginPacket();
+  LoRa.print(tmp_string);
+  LoRa.endPacket();
+  
+  display.clearDisplay();
+  display.setCursor(10, 5);
+  display.print("Sending: "+tmp_string.substring(13,19));
+  display.setCursor(10, 20);
+  display.print("Temp: "+tmp_string.substring(49,55));
+  display.setCursor(10, 35);
+  display.print("Humid: "+tmp_string.substring(69,75));
+  // write the buffer to the display
+  display.display();
+
+}
